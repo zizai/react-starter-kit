@@ -19,6 +19,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/server';
 import UniversalRouter from 'universal-router';
 import PrettyError from 'pretty-error';
+import App from './components/App';
 import Html from './components/Html';
 import { ErrorPageWithoutStyle } from './routes/error/ErrorPage';
 import errorPageStyle from './routes/error/ErrorPage.css';
@@ -84,32 +85,37 @@ app.use('/graphql', expressGraphQL(req => ({
 // -----------------------------------------------------------------------------
 app.get('*', async (req, res, next) => {
   try {
-    let css = new Set();
-    let statusCode = 200;
-    const data = { title: '', description: '', style: '', script: assets.main.js, children: '' };
+    const css = new Set();
 
-    await UniversalRouter.resolve(routes, {
+    // Global (context) variables that can be easily accessed from any React component
+    // https://facebook.github.io/react/docs/context.html
+    const context = {
+      // Enables critical path CSS rendering
+      // https://github.com/kriasoft/isomorphic-style-loader
+      insertCss: (...styles) => {
+        // eslint-disable-next-line no-underscore-dangle
+        styles.forEach(style => css.add(style._getCss()));
+      },
+    };
+
+    const route = await UniversalRouter.resolve(routes, {
       path: req.path,
       query: req.query,
-      context: {
-        insertCss: (...styles) => {
-          styles.forEach(style => css.add(style._getCss())); // eslint-disable-line no-underscore-dangle, max-len
-        },
-        setTitle: value => (data.title = value),
-        setMeta: (key, value) => (data[key] = value),
-      },
-      render(component, status = 200) {
-        css = new Set();
-        statusCode = status;
-        data.children = ReactDOM.renderToString(component);
-        data.style = [...css].join('');
-        return true;
-      },
     });
 
+    if (route.redirect) {
+      res.redirect(route.status || 302, route.redirect);
+      return;
+    }
+
+    const data = { ...route };
+    data.children = ReactDOM.renderToString(<App context={context}>{route.component}</App>);
+    data.style = [...css].join('');
+    data.script = assets.main.js;
+    data.chunk = assets[route.chunk] && assets[route.chunk].js;
     const html = ReactDOM.renderToStaticMarkup(<Html {...data} />);
 
-    res.status(statusCode);
+    res.status(route.status || 200);
     res.send(`<!doctype html>${html}`);
   } catch (err) {
     next(err);
@@ -125,7 +131,6 @@ pe.skipPackage('express');
 
 app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   console.log(pe.render(err)); // eslint-disable-line no-console
-  const statusCode = err.status || 500;
   const html = ReactDOM.renderToStaticMarkup(
     <Html
       title="Internal Server Error"
@@ -135,7 +140,7 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
       {ReactDOM.renderToString(<ErrorPageWithoutStyle error={err} />)}
     </Html>
   );
-  res.status(statusCode);
+  res.status(err.status || 500);
   res.send(`<!doctype html>${html}`);
 });
 
